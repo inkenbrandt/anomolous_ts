@@ -19,8 +19,14 @@ authors = [
 ]
 requires-python = ">=3.9"
 dependencies = [
-  # Add your own dependencies here
-]
+  'datetime',
+  'matplotlib',
+  'numpy',
+  'pandas',
+  'scipy',
+  'seaborn',
+  'sklearn',
+  'statsmodels']
 license = {file = "LICENSE"}
 
 [project.urls]

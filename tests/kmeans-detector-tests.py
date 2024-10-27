@@ -1,8 +1,7 @@
 import unittest
 import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta
-from sklearn.preprocessing import StandardScaler
+
 from scipy import stats
 
 from anomolous_ts.preprocessor import TimeSeriesPreprocessor
