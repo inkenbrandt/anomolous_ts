@@ -110,3 +110,192 @@ Absolutely! If you don't want to publish your package, just delete the `docs/` d
 
 If you find a bug :bug:, please open a [bug report](https://github.com/allenai/python-package-template/issues/new?assignees=&labels=bug&template=bug_report.md&title=).
 If you have an idea for an improvement or new feature :rocket:, please open a [feature request](https://github.com/allenai/python-package-template/issues/new?assignees=&labels=Feature+request&template=feature_request.md&title=).
+
+# Anomalous TS: Time Series Anomaly Detection
+
+A Python package for detecting anomalies in time series data using multiple detection methods and advanced preprocessing techniques.
+
+## Overview
+
+Anomalous TS provides robust tools for identifying unusual patterns and outliers in time series data. It implements multiple detection algorithms, supports both univariate and multivariate time series, and includes comprehensive preprocessing and visualization capabilities.
+
+## Key Features
+
+- **Multiple Detection Methods**:
+  - Isolation Forest based detection
+  - K-means clustering based detection
+  - Support for both point and contextual anomalies
+  - Confidence scores for detected anomalies
+
+- **Advanced Preprocessing**:
+  - Multiple imputation methods for missing values
+  - Various scaling options
+  - Seasonal decomposition
+  - Trend analysis
+
+- **Visualization Tools**:
+  - Interactive anomaly plots
+  - Cluster visualization
+  - Confidence score visualization
+  - Preprocessing results visualization
+
+- **Time Series Features**:
+  - Sliding window analysis
+  - Seasonal pattern recognition
+  - Trend detection
+  - Support for various time frequencies
+
+## Installation
+
+```bash
+pip install anomalous-ts
+```
+
+## Quick Start
+
+```python
+import pandas as pd
+from anomalous_ts import TimeSeriesIsolationForest
+
+# Load your time series data
+data = pd.Series(your_data)
+
+# Initialize detector
+detector = TimeSeriesIsolationForest(
+    window_size=24,  # for daily seasonality
+    seasonal_period=24
+)
+
+# Detect anomalies
+anomalies, scores = detector.detect_and_visualize(data)
+
+# Print results
+print(f"Found {anomalies.sum()} anomalies")
+```
+
+## Detailed Example
+
+```python
+from anomalous_ts import (
+    TimeSeriesKMeansDetector,
+    TimeSeriesPreprocessor,
+    TimeSeriesVisualizer
+)
+
+# Initialize components
+preprocessor = TimeSeriesPreprocessor(
+    imputation_method='hybrid',
+    scaling_method='robust'
+)
+
+visualizer = TimeSeriesVisualizer()
+
+# Initialize detector
+detector = TimeSeriesKMeansDetector(
+    window_size=24,
+    n_clusters=3,
+    seasonal_period=24,
+    preprocessor=preprocessor,
+    visualizer=visualizer
+)
+
+# Detect and visualize anomalies
+anomalies, scores = detector.detect_and_visualize(your_data)
+```
+
+## Key Use Cases
+
+1. **Financial Time Series**:
+   - Detect unusual trading patterns
+   - Identify market anomalies
+   - Monitor trading volumes
+
+2. **IOT and Sensor Data**:
+   - Detect equipment failures
+   - Identify sensor malfunctions
+   - Monitor system health
+
+3. **Business Metrics**:
+   - Detect unusual sales patterns
+   - Identify website traffic anomalies
+   - Monitor performance metrics
+
+4. **Environmental Data**:
+   - Detect unusual weather patterns
+   - Identify environmental anomalies
+   - Monitor climate indicators
+
+## Features in Detail
+
+### Preprocessing Options
+
+- **Imputation Methods**:
+  - Linear interpolation
+  - Spline interpolation
+  - KNN imputation
+  - Forward/backward fill
+  - Hybrid methods
+
+- **Scaling Methods**:
+  - Standard scaling
+  - Robust scaling
+  - Min-max scaling
+
+### Detection Algorithms
+
+1. **Isolation Forest**:
+   - Unsupervised detection
+   - Handles high-dimensional data
+   - Provides anomaly scores
+
+2. **K-means Detection**:
+   - Cluster-based detection
+   - Pattern recognition
+   - Distance-based scoring
+
+### Visualization Capabilities
+
+- Time series plots with highlighted anomalies
+- Confidence score visualization
+- Cluster visualization
+- Preprocessing results visualization
+
+## Requirements
+
+- Python ≥ 3.8
+- NumPy
+- Pandas
+- Scikit-learn
+- Matplotlib
+- SciPy
+- Statsmodels
+
+## Contributing
+
+We welcome contributions! Please see our [contributing guidelines](CONTRIBUTING.md) for details.
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Citation
+Made using Claude:
+   Anthropic. (2024). Claude (Version 3.5) [AI Assistant]. https://anthropic.com/claude
+
+If you use this package in your research, please cite:
+
+```bibtex
+@software{anomalous_ts,
+  title = {Anomalous TS: Time Series Anomaly Detection},
+  author = {inkenbrandt},
+  year = {2024},
+  url = {https://github.com/inkenbrandt/anomalous_ts}
+}
+```
+
+## Support
+
+For support, please:
+1. Check the [documentation](https://anomalous-ts.readthedocs.io)
+2. Create an issue on [GitHub](https://github.com/yourusername/anomalous_ts/issues)
+3. Contact the maintainers

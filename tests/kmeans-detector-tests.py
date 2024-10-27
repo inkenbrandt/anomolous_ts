@@ -7,7 +7,7 @@ from scipy import stats
 
 from anomolous_ts.preprocessor import TimeSeriesPreprocessor
 from anomolous_ts.visualizer import TimeSeriesVisualizer
-from anomolous_ts.detector import TimeSeriesKMeansDetector
+from anomolous_ts.kmeans import TimeSeriesKMeansDetector
 
 class TestTimeSeriesKMeansDetector(unittest.TestCase):
     def setUp(self):

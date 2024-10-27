@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 # See https://setuptools.pypa.io/en/latest/userguide/quickstart.html for more project configuration options.
-name = "my-package"
+name = "anomlous_ts"
 dynamic = ["version"]
 readme = "README.md"
 classifiers = [
@@ -68,7 +68,7 @@ include-package-data = true
 my_package = ["py.typed"]
 
 [tool.setuptools.dynamic]
-version = {attr = "my_package.version.VERSION"}
+version = {attr = "anomolous_ts.version.VERSION"}
 
 [tool.black]
 line-length = 100

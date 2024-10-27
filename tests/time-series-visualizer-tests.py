@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 
 # Import the TimeSeriesVisualizer class
-from your_module import TimeSeriesVisualizer  # Adjust import path as needed
+from anomolous_ts import TimeSeriesVisualizer  # Adjust import path as needed
 
 @pytest.fixture
 def visualizer():

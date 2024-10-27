@@ -4,6 +4,7 @@ from .preprocessor import *
 from .shesd import *
 from .preprocessor import *
 from .visualizer import *
+from .kmeans import *
 
 __all__ = [
     'TimeSeriesPreprocessor',

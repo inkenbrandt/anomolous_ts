@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 # Import the classes to test
 from anomolous_ts.preprocessor import TimeSeriesPreprocessor
 from anomolous_ts.visualizer import TimeSeriesVisualizer
-from your_module import TimeSeriesIsolationForest, AdvancedTimeSeriesIsolationForest
+from anomolous_ts import TimeSeriesIsolationForest, AdvancedTimeSeriesIsolationForest
 
 class TestTimeSeriesIsolationForest(unittest.TestCase):
     def setUp(self):
