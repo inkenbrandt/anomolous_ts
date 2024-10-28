@@ -32,13 +32,27 @@ class TimeseriesGenerator:
         return data + np.random.normal(0, noise_level, self.periods)
 
     def _generate_anomalies(self, data, num_anomalies=5, amplitude_range=(2, 4)):
-        """Add random anomalies to the data."""
+        """Add random anomalies to the data.
+
+        Args:
+            data: Input time series data
+            num_anomalies: Number of anomalies to generate
+            amplitude_range: Range of anomaly amplitudes (min, max)
+
+        Returns:
+            tuple: (data with anomalies, indices of anomalies)
+        """
         anomaly_indices = np.random.choice(self.periods, num_anomalies, replace=False)
         anomaly_data = data.copy()
+
+        # Calculate standard deviation, use 1.0 if it's zero
+        std_dev = max(np.std(data), 1.0)
+
         for idx in anomaly_indices:
             multiplier = np.random.uniform(*amplitude_range)
             sign = np.random.choice([-1, 1])
-            anomaly_data[idx] += sign * multiplier * np.std(data)
+            anomaly_data[idx] += sign * multiplier * std_dev
+
         return anomaly_data, anomaly_indices
 
     def generate_correlated_series(self, n_series=2, correlation_matrix=None,
@@ -111,31 +125,3 @@ class TimeseriesGenerator:
 
         return df, anomaly_locations
 
-
-# Example usage
-if __name__ == "__main__":
-    # Initialize generator
-    generator = TimeseriesGenerator(start_date='2024-01-01', periods=365)
-
-    # Define correlation matrix for 3 series
-    correlation_matrix = np.array([
-        [1.0, 0.7, -0.3],
-        [0.7, 1.0, -0.5],
-        [-0.3, -0.5, 1.0]
-    ])
-
-    # Generate data
-    df, anomaly_locations = generator.generate_correlated_series(
-        n_series=3,
-        correlation_matrix=correlation_matrix,
-        seasonal_periods=[365, 7],  # Annual and weekly seasonality
-        trend_slopes=[0.1, 0.05, -0.08],
-        noise_levels=[0.1, 0.15, 0.12],
-        num_anomalies=5
-    )
-
-    print("Generated DataFrame:")
-    print(df.head())
-    print("\nAnomalies located at:")
-    for series, dates in anomaly_locations.items():
-        print(f"{series}: {dates.tolist()}")

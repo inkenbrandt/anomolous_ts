@@ -4,7 +4,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 
 # Import the classes to test
-from anomolous_ts.preprocessor import TimeSeriesPreprocessor
+from anomolous_ts.feature_extractors import TimeSeriesPreprocessor
 from anomolous_ts.visualizer import TimeSeriesVisualizer
 from anomolous_ts import TimeSeriesIsolationForest, AdvancedTimeSeriesIsolationForest
 

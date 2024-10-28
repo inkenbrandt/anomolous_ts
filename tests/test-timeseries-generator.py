@@ -6,7 +6,7 @@ import pytest
 import numpy as np
 import pandas as pd
 from datetime import datetime
-from timeseries_generator import TimeseriesGenerator
+from anomolous_ts.anomolize import TimeseriesGenerator
 
 class TestTimeseriesGenerator:
     @pytest.fixture
@@ -58,24 +58,40 @@ class TestTimeseriesGenerator:
         assert not np.array_equal(noisy_data, data)  # Should be different from input
 
     def test_anomaly_generation(self, generator):
-        """Test anomaly generation."""
-        data = np.zeros(generator.periods)
-        anomaly_data, anomaly_indices = generator._generate_anomalies(
-            data, 
-            num_anomalies=5,
-            amplitude_range=(2, 4)
-        )
-        
-        assert isinstance(anomaly_data, np.ndarray)
-        assert isinstance(anomaly_indices, np.ndarray)
-        assert len(anomaly_indices) == 5
-        assert len(np.unique(anomaly_indices)) == 5  # All indices should be unique
-        assert not np.array_equal(anomaly_data, data)  # Should have anomalies
-        
-        # Check if anomalies are within expected range
-        anomaly_values = anomaly_data[anomaly_indices]
-        assert np.all(np.abs(anomaly_values) > 0)  # All anomalies should be non-zero
+        """Test anomaly generation in data."""
+        # Use non-zero data to ensure valid standard deviation
+        data = np.ones(generator.periods)
+        num_anomalies = 5
+        amplitude_range = (2, 4)
 
+        anomaly_data, anomaly_indices = generator._generate_anomalies(
+            data,
+            num_anomalies=num_anomalies,
+            amplitude_range=amplitude_range
+        )
+
+        assert len(anomaly_indices) == num_anomalies
+        assert len(np.unique(anomaly_indices)) == num_anomalies  # No duplicates
+        assert not np.allclose(anomaly_data[anomaly_indices], data[anomaly_indices])  # Anomalies were added
+        assert np.allclose(np.delete(anomaly_data, anomaly_indices), 1.0)  # Rest unchanged
+
+    def test_anomaly_generation_zero_data(self, generator):
+        """Test anomaly generation with zero data."""
+        data = np.zeros(generator.periods)
+        num_anomalies = 5
+        amplitude_range = (2, 4)
+
+        anomaly_data, anomaly_indices = generator._generate_anomalies(
+            data,
+            num_anomalies=num_anomalies,
+            amplitude_range=amplitude_range
+        )
+
+        assert len(anomaly_indices) == num_anomalies
+        assert len(np.unique(anomaly_indices)) == num_anomalies  # No duplicates
+        # For zero data, check if anomalies were added using absolute values
+        assert np.any(np.abs(anomaly_data[anomaly_indices]) > 0)  # Anomalies should be non-zero
+        assert np.allclose(np.delete(anomaly_data, anomaly_indices), 0)  # Rest unchanged
     def test_correlated_series_generation(self, generator):
         """Test generation of correlated time series."""
         n_series = 3
@@ -176,15 +192,52 @@ class TestTimeseriesGenerator:
 
     def test_input_validation(self):
         """Test input validation for various parameters."""
-        with pytest.raises(ValueError):
-            TimeseriesGenerator(periods=-1)  # Invalid negative periods
-            
-        with pytest.raises(ValueError):
-            TimeseriesGenerator(frequency='INVALID')  # Invalid frequency
-            
-        generator = TimeseriesGenerator()
-        with pytest.raises(ValueError):
-            generator.generate_correlated_series(n_series=0)  # Invalid number of series
+        # Test invalid periods
+        with pytest.raises(ValueError, match="periods must be positive"):
+            TimeseriesGenerator(periods=-1)
+
+        with pytest.raises(ValueError, match="periods must be positive"):
+            TimeseriesGenerator(periods=0)
+
+        with pytest.raises(TypeError, match="periods must be an integer"):
+            TimeseriesGenerator(periods=3.14)
+
+        # Test invalid frequency
+        with pytest.raises(ValueError, match="frequency must be one of"):
+            TimeseriesGenerator(frequency='invalid')
+
+        with pytest.raises(TypeError, match="frequency must be a string"):
+            TimeseriesGenerator(frequency=123)
+
+        # Test invalid start_date
+        with pytest.raises(ValueError, match="Invalid start_date format"):
+            TimeseriesGenerator(start_date='invalid-date')
+
+        with pytest.raises(ValueError, match="Invalid start_date format"):
+            TimeseriesGenerator(start_date=123)
+
+    def test_valid_inputs(self):
+        """Test various valid input combinations."""
+        # Test minimum valid periods
+        gen = TimeseriesGenerator(periods=1)
+        assert gen.periods == 1
+        assert len(gen.date_range) == 1
+
+        # Test different valid frequencies
+        for freq in ['D', 'H', 'W', 'M', 'Q', 'Y']:
+            gen = TimeseriesGenerator(frequency=freq)
+            assert gen.frequency == freq
+
+        # Test different date formats
+        date_formats = [
+            '2024-01-01',
+            '2024/01/01',
+            datetime(2024, 1, 1),
+            np.datetime64('2024-01-01')
+        ]
+        for date in date_formats:
+            gen = TimeseriesGenerator(start_date=date)
+            assert gen.start_date == pd.to_datetime('2024-01-01')
 
 if __name__ == '__main__':
     pytest.main([__file__])

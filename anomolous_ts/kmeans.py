@@ -1,510 +1,348 @@
+from typing import Dict, List, Optional, Any, Tuple, Iterator, Callable, Union
 import numpy as np
 import pandas as pd
-from sklearn.cluster import KMeans
+from dataclasses import dataclass
+from datetime import datetime
 from scipy import stats
 from scipy.spatial.distance import cdist
+from sklearn.cluster import KMeans
+from dataclasses import dataclass, field
 
-from anomolous_ts.preprocessor import TimeSeriesPreprocessor
-from anomolous_ts.visualizer import TimeSeriesVisualizer
+from typing import Optional, Dict, Any, List, Iterator, Callable, TypeVar
+import numpy as np
+import pandas as pd
+from datetime import datetime
+from scipy import stats
+from scipy.spatial.distance import cdist
+from sklearn.cluster import KMeans
 
-class TimeSeriesKMeansDetector:
-    """
-    Time series anomaly detection using K-means clustering.
-    Detects anomalies by identifying points that are far from their cluster centers.
-    """
+
+T = TypeVar('T', bound='TimeSeriesKMeansDetector')
+
+
+from .feature_extractors import (
+    StatisticalFeatureExtractor, SpectralFeatureExtractor, WaveletFeatureExtractor, PreprocessorProtocol,FeatureExtractorConfig,
+)
+
+from .base import (
+    BaseDetector,
+    StreamingDetector,
+    DetectionResult,
+    AnomalyScore,
+    TimeSeriesData,
+)
+
+@dataclass
+class KMeansConfig:
+    """Configuration for KMeans detector."""
+    n_clusters: int = 3
+    window_size: int = 10
+    anomaly_threshold: float = 2.0
+    seasonal_period: Optional[int] = None
+    random_state: int = 42
+    feature_settings: Dict[str, Any] = field(default_factory=lambda: {
+        'statistical': True,
+        'spectral': False,
+        'wavelet': False
+    })
+    preprocessing_config: Dict[str, Any] = field(default_factory=dict)
+
+
+class TimeSeriesKMeansDetector(BaseDetector[T]):
+    """Enhanced KMeans-based anomaly detector for time series data."""
 
     def __init__(
             self,
-            window_size=10,
-            n_clusters=3,
-            anomaly_threshold=2.0,
-            seasonal_period=None,
-            preprocessor=None,
-            visualizer=None,
-            random_state=42
+            config: Optional[KMeansConfig] = None,
+            preprocessor: Optional[PreprocessorProtocol] = None
     ):
-        """
-        Initialize the K-means time series detector.
+        self.config = config or KMeansConfig()
+        self.preprocessor = preprocessor
 
-        Parameters
-        ----------
-        window_size : int, default=10
-            Size of sliding window for feature extraction
-        n_clusters : int, default=3
-            Number of clusters for K-means
-        anomaly_threshold : float, default=2.0
-            Number of standard deviations from cluster center to consider as anomaly
-        seasonal_period : int, optional
-            Period for seasonal feature extraction
-        preprocessor : TimeSeriesPreprocessor, optional
-            Custom preprocessor instance
-        visualizer : TimeSeriesVisualizer, optional
-            Custom visualizer instance
-        random_state : int, default=42
-            Random state for reproducibility
-        """
-        self.window_size = window_size
-        self.n_clusters = n_clusters
-        self.anomaly_threshold = anomaly_threshold
-        self.seasonal_period = seasonal_period
-        self.random_state = random_state
-
-        # Initialize K-means model
-        self.model = KMeans(
-            n_clusters=n_clusters,
-            random_state=random_state
+        # Initialize KMeans model
+        self._model = KMeans(
+            n_clusters=self.config.n_clusters,
+            random_state=self.config.random_state
         )
 
-        # Initialize preprocessor and visualizer
-        self.preprocessor = preprocessor or TimeSeriesPreprocessor()
-        self.visualizer = visualizer or TimeSeriesVisualizer()
+        # Initialize feature extractors
+        self._feature_extractors = []
+        self._setup_feature_extractors()
 
-        # Store cluster centers and distances
-        self.cluster_centers_ = None
-        self.cluster_distances_ = None
-        self.labels_ = None
+        # Internal state
+        self._cluster_centers: Optional[np.ndarray] = None
+        self._cluster_distances: Optional[np.ndarray] = None
+        self._labels: Optional[np.ndarray] = None
 
-    def _create_temporal_features(self, data):
-        """
-        Create temporal features using sliding windows.
+    def _handle_missing_values(self, data: np.ndarray) -> np.ndarray:
+        """Handle missing values in feature matrix."""
+        if np.any(np.isnan(data)):
+            # Forward fill, then backward fill
+            filled_data = pd.DataFrame(data).fillna(method='ffill').fillna(method='bfill')
+            # If any NaNs remain (e.g., at start/end), replace with zeros
+            return filled_data.fillna(0).values
+        return data
 
-        Parameters
-        ----------
-        data : np.array
-            Input time series data
+    def _setup_feature_extractors(self) -> None:
+        """Initialize feature extractors based on configuration."""
+        extractor_config = FeatureExtractorConfig(
+            window_sizes=[self.config.window_size],
+            wavelet_level=3
+        )
 
-        Returns
-        -------
-        np.array
-            Feature matrix
-        """
-        n_samples = len(data)
-        features_list = []
-
-        for i in range(self.window_size, n_samples):
-            window = data[i - self.window_size:i]
-
-            feature_vector = [
-                np.mean(window),
-                np.std(window),
-                np.min(window),
-                np.max(window),
-                np.median(window),
-                np.ptp(window),
-                data[i],
-                data[i] - window[-1],
-                np.sum(np.diff(window) > 0),
-                stats.skew(window),
-                stats.kurtosis(window),
-                np.percentile(window, 25),
-                np.percentile(window, 75)
-            ]
-
-            # Add seasonal features if specified
-            if self.seasonal_period and i >= self.seasonal_period:
-                seasonal_features = [
-                    data[i] - data[i - self.seasonal_period],
-                    np.mean(data[i - self.seasonal_period:i:self.seasonal_period]),
-                    np.std(data[i - self.seasonal_period:i:self.seasonal_period])
-                ]
-                feature_vector.extend(seasonal_features)
-            else:
-                feature_vector.extend([0, 0, 0])
-
-            features_list.append(feature_vector)
-
-        # Pad initial window with zeros
-        padding = np.zeros((self.window_size, len(features_list[0])))
-        return np.vstack((padding, np.array(features_list)))
-
-    def _calculate_anomaly_scores(self, features):
-        """
-        Calculate anomaly scores based on distance to cluster centers.
-
-        Parameters
-        ----------
-        features : np.array
-            Feature matrix
-
-        Returns
-        -------
-        np.array
-            Anomaly scores
-        """
-        # Calculate distances to assigned cluster centers
-        distances = np.min(cdist(features, self.cluster_centers_), axis=1)
-
-        # Calculate z-scores of distances
-        z_scores = stats.zscore(distances)
-
-        # Convert to probability scores using sigmoid function
-        scores = 1 / (1 + np.exp(-z_scores))
-
-        return scores
-
-    def fit_predict(self, data, return_scores=False):
-        """
-        Fit the model and predict anomalies.
-
-        Parameters
-        ----------
-        data : pd.Series or pd.DataFrame
-            Input time series data
-        return_scores : bool, default=False
-            Whether to return anomaly scores
-
-        Returns
-        -------
-        tuple or pd.Series/DataFrame
-            Boolean indicators for anomalies and optionally anomaly scores
-        """
-        # Preprocess data
-        preprocessed_data = self.preprocessor.impute_missing_values(data)
-
-        # Create features
-        if isinstance(preprocessed_data, pd.DataFrame):
-            features_list = []
-            for column in preprocessed_data.columns:
-                features = self._create_temporal_features(preprocessed_data[column].values)
-                features_list.append(features)
-            features = np.hstack(features_list)
-        else:
-            features = self._create_temporal_features(preprocessed_data.values)
-
-        # Scale features
-        if self.preprocessor.scaler is not None:
-            features = self.preprocessor.scaler.fit_transform(features)
-
-        # Fit K-means and get cluster assignments
-        self.labels_ = self.model.fit_predict(features)
-        self.cluster_centers_ = self.model.cluster_centers_
-
-        # Calculate anomaly scores
-        anomaly_scores = self._calculate_anomaly_scores(features)
-
-        # Determine anomalies based on threshold
-        is_anomaly = anomaly_scores > self.anomaly_threshold
-
-        # Prepare output
-        if isinstance(data, pd.DataFrame):
-            # Split results for multivariate case
-            n_vars = len(data.columns)
-            anomalies = np.array_split(is_anomaly, n_vars)
-            scores = np.array_split(anomaly_scores, n_vars)
-
-            anomalies_df = pd.DataFrame(
-                np.column_stack(anomalies),
-                index=data.index,
-                columns=data.columns
+        if self.config.feature_settings.get('statistical', True):
+            self._feature_extractors.append(
+                StatisticalFeatureExtractor(extractor_config)
+            )
+        if self.config.feature_settings.get('spectral', False):
+            self._feature_extractors.append(
+                SpectralFeatureExtractor(extractor_config)
+            )
+        if self.config.feature_settings.get('wavelet', False):
+            self._feature_extractors.append(
+                WaveletFeatureExtractor(extractor_config)
             )
 
-            if return_scores:
-                scores_df = pd.DataFrame(
-                    np.column_stack(scores),
-                    index=data.index,
-                    columns=data.columns
-                )
-                return anomalies_df, scores_df
-            return anomalies_df
+    def _extract_features(self, data: np.ndarray) -> np.ndarray:
+        """Extract all features and handle missing values."""
+        all_features = []
+        data = self._handle_missing_values(data)
 
+        for extractor in self._feature_extractors:
+            features = extractor.extract(data)
+            for name, feature_values in features.items():
+                # Handle potential NaN values in features
+                feature_values = np.nan_to_num(feature_values, nan=0.0)
+
+                # Ensure all feature arrays have the same length as data
+                if len(feature_values) < len(data):
+                    padded = np.pad(
+                        feature_values,
+                        (0, len(data) - len(feature_values)),
+                        mode='edge'
+                    )
+                    all_features.append(padded)
+                elif len(feature_values) > len(data):
+                    all_features.append(feature_values[:len(data)])
+                else:
+                    all_features.append(feature_values)
+
+        # Stack features and handle any remaining NaNs
+        feature_matrix = np.column_stack(all_features)
+        return self._handle_missing_values(feature_matrix)
+
+    def fit(self, data: TimeSeriesData) -> T:
+        """Fit the detector to the data."""
+        if self.preprocessor is not None:
+            data = self.preprocessor.transform(data)
+
+        # Convert to numpy array if needed
+        if isinstance(data, (pd.Series, pd.DataFrame)):
+            data_values = data.values
         else:
-            anomalies = pd.Series(is_anomaly, index=data.index)
-            if return_scores:
-                scores = pd.Series(anomaly_scores, index=data.index)
-                return anomalies, scores
-            return anomalies
+            data_values = np.asarray(data)
 
-    def detect_and_visualize(self, data, title="K-means Clustering Anomaly Detection"):
-        """
-        Detect anomalies and visualize results in one step.
+        # Extract features and ensure they're 2D
+        features = self._extract_features(data_values)
 
-        Parameters
-        ----------
-        data : pd.Series or pd.DataFrame
-            Input time series data
-        title : str
-            Plot title
+        # Fit KMeans model
+        self._labels = self._model.fit_predict(features)
+        self._cluster_centers = self._model.cluster_centers_
 
-        Returns
-        -------
-        tuple
-            (anomalies, anomaly_scores)
-        """
-        # Detect anomalies with scores
-        anomalies, scores = self.fit_predict(data, return_scores=True)
-
-        # Create cluster-based visualization
-        self.visualizer.plot_clusters(
-            data,
-            self.labels_,
-            anomalies,
-            scores,
-            self.n_clusters,
-            title
+        # Calculate cluster distances
+        self._cluster_distances = np.min(
+            cdist(features, self._cluster_centers),
+            axis=1
         )
 
-        return anomalies, scores
+        return self
 
-    def get_cluster_profiles(self):
-        """
-        Get statistical profiles of each cluster.
+    def predict(self, data: TimeSeriesData) -> DetectionResult:
+        """Predict anomalies in the data."""
+        if self._cluster_centers is None:
+            raise ValueError("Detector must be fitted before prediction")
 
-        Returns
-        -------
-        dict
-            Dictionary containing cluster statistics
-        """
-        if self.cluster_centers_ is None:
-            raise ValueError("Model hasn't been fitted yet!")
+        if self.preprocessor is not None:
+            data = self.preprocessor.transform(data)
 
-        profiles = {}
-        for i in range(self.n_clusters):
-            cluster_points = self.labels_ == i
-            profiles[f'Cluster_{i}'] = {
-                'size': np.sum(cluster_points),
-                'center': self.cluster_centers_[i],
-                'mean_distance': np.mean(self.cluster_distances_[cluster_points]),
-                'std_distance': np.std(self.cluster_distances_[cluster_points])
+        # Convert to numpy array
+        if isinstance(data, (pd.Series, pd.DataFrame)):
+            data_values = data.values
+        else:
+            data_values = np.asarray(data)
+
+        # Extract features
+        features = self._extract_features(data_values)
+
+        # Calculate distances and scores
+        distances = np.min(cdist(features, self._cluster_centers), axis=1)
+        z_scores = stats.zscore(distances)
+        scores = 1 / (1 + np.exp(-z_scores))  # Sigmoid transformation
+
+        # Create anomaly scores
+        anomaly_scores = []
+        for i, score in enumerate(scores):
+            timestamp = data.index[i] if hasattr(data, 'index') else datetime.now()
+            is_anomaly = score > self.config.anomaly_threshold
+
+            anomaly_scores.append(AnomalyScore(
+                score=float(score),
+                is_anomaly=is_anomaly,
+                confidence=float(abs(score - 0.5) * 2),
+                timestamp=timestamp,
+                contributing_features=self._get_feature_contributions(
+                    features[i],
+                    self._model.predict([features[i]])[0]
+                )
+            ))
+
+        return DetectionResult(
+            scores=anomaly_scores,
+            detector_name="KMeansDetector",
+            detection_time=datetime.now(),
+            metadata={
+                "n_clusters": self.config.n_clusters,
+                "window_size": self.config.window_size,
+                "threshold": self.config.anomaly_threshold,
+                "cluster_sizes": np.bincount(self._labels).tolist()
             }
+        )
 
-        return profiles
+    def _get_feature_contributions(
+            self,
+            features: np.ndarray,
+            cluster_label: int
+    ) -> Dict[str, float]:
+        """Calculate feature contributions to anomaly score."""
+        center = self._cluster_centers[cluster_label]
+        distances = np.abs(features - center)
+        total_distance = np.sum(distances)
 
-    def process_stream(self, data_stream, chunk_size=100):
+        if total_distance == 0:
+            return {}
+
+        contributions = {
+            f"feature_{i}": float(d / total_distance)
+            for i, d in enumerate(distances)
+            if d / total_distance > 0.1
+        }
+
+        return contributions
+
+    def score(self, data: TimeSeriesData) -> np.ndarray:
+        """Get raw anomaly scores."""
+        if self._cluster_centers is None:
+            raise ValueError("Detector must be fitted before scoring")
+
+        if self.preprocessor is not None:
+            data = self.preprocessor.transform(data)
+
+        features = self._extract_features(
+            data.values if isinstance(data, (pd.Series, pd.DataFrame)) else data
+        )
+
+        distances = np.min(cdist(features, self._cluster_centers), axis=1)
+        return stats.zscore(distances)
+
+    @property
+    def metadata(self) -> Dict[str, Any]:
+        """Get detector metadata."""
+        return {
+            "name": "TimeSeriesKMeansDetector",
+            "version": "2.0",
+            "config": self.config.__dict__,
+            "n_clusters": self.config.n_clusters,
+            "feature_extractors": [type(ex).__name__ for ex in self._feature_extractors],
+            "fitted": self._cluster_centers is not None
+        }
+
+class StreamingKMeansDetector(StreamingDetector[T]):
+    """Streaming version of the KMeans detector."""
+
+    def __init__(
+            self,
+            config: Optional[KMeansConfig] = None,
+            preprocessor: Optional[PreprocessorProtocol] = None,
+            update_interval: int = 1000
+    ):
+        self.base_detector = TimeSeriesKMeansDetector(config, preprocessor)
+        self.update_interval = update_interval
+        self._buffer: List[TimeSeriesData] = []
+        self._n_processed = 0
+
+    def fit(self, data: TimeSeriesData) -> T:
+        """Initial fit of the detector."""
+        self.base_detector.fit(data)
+        return self
+    def predict(self, data: TimeSeriesData) -> DetectionResult:
+        """Predict using the current model state."""
+        return self.base_detector.predict(data)
+
+    def score(self, data: TimeSeriesData) -> np.ndarray:
+        """Get anomaly scores using the current model state."""
+        return self.base_detector.score(data)
+
+    def process_stream(
+        self,
+        data_stream: Iterator[TimeSeriesData],
+        callback: Optional[Callable[[DetectionResult], None]] = None
+    ) -> Iterator[DetectionResult]:
         """
-        Process streaming data in chunks.
+        Process streaming data.
 
         Parameters
         ----------
-        data_stream : iterator
-            Iterator yielding new data points
-        chunk_size : int, default=100
-            Size of data chunks to process at once
+        data_stream : Iterator[TimeSeriesData]
+            Stream of time series data
+        callback : Optional[Callable]
+            Optional callback function for results
 
         Yields
         ------
-        tuple
-            (chunk_data, anomalies, scores)
+        DetectionResult
+            Detection results for each processed chunk
         """
-        chunk = []
         for data_point in data_stream:
-            chunk.append(data_point)
+            self._buffer.append(data_point)
+            self._n_processed += 1
 
-            if len(chunk) >= chunk_size:
-                # Convert chunk to appropriate format
-                if isinstance(data_point, tuple):
-                    chunk_data = pd.DataFrame(chunk)
-                else:
-                    chunk_data = pd.Series(chunk)
+            if len(self._buffer) >= self.base_detector.config.window_size:
+                # Create window of data
+                window_data = pd.concat(self._buffer[-self.base_detector.config.window_size:])
 
-                # Detect anomalies
-                anomalies, scores = self.fit_predict(chunk_data, return_scores=True)
+                # Get predictions
+                result = self.predict(window_data)
 
-                # Visualize results
-                self.visualizer.plot_clusters(
-                    chunk_data,
-                    self.labels_,
-                    anomalies,
-                    scores,
-                    self.n_clusters,
-                    f'Streaming Anomaly Detection - Chunk Size {chunk_size}'
-                )
+                if callback:
+                    callback(result)
 
-                yield chunk_data, anomalies, scores
-                chunk = []
+                yield result
 
+                # Update model if needed
+                if self._n_processed >= self.update_interval:
+                    self.update(pd.concat(self._buffer))
+                    self._n_processed = 0
+                    self._buffer = self._buffer[-self.base_detector.config.window_size:]
 
-if __name__ == "__main__":
-    import numpy as np
-    import pandas as pd
-    from datetime import datetime, timedelta
+    def update(self, new_data: TimeSeriesData) -> None:
+        """Update the model with new data."""
+        self.base_detector.fit(new_data)
 
-    # Set random seed for reproducibility
-    np.random.seed(42)
-
-
-    def generate_synthetic_data(n_points=1000, n_patterns=3):
-        """Generate synthetic time series with multiple patterns and anomalies."""
-        dates = pd.date_range('2024-01-01', periods=n_points, freq='H')
-
-        # Generate different patterns
-        t = np.linspace(0, 8 * np.pi, n_points)
-        patterns = []
-
-        # Pattern 1: Sine wave with daily seasonality
-        p1 = 10 * np.sin(2 * np.pi * np.arange(n_points) / 24)
-        patterns.append(p1)
-
-        # Pattern 2: Saw tooth pattern
-        p2 = 5 * stats.zscore(np.abs(np.mod(t, np.pi) - np.pi / 2))
-        patterns.append(p2)
-
-        # Pattern 3: Square wave
-        p3 = 7 * np.sign(np.sin(t / 4))
-        patterns.append(p3)
-
-        # Combine patterns with transitions
-        signal = np.zeros(n_points)
-        pattern_length = n_points // n_patterns
-        for i in range(n_patterns):
-            start_idx = i * pattern_length
-            end_idx = (i + 1) * pattern_length
-            signal[start_idx:end_idx] = patterns[i][:pattern_length]
-
-        # Add trend
-        trend = 0.01 * np.arange(n_points)
-        signal += trend
-
-        # Add noise
-        noise = np.random.normal(0, 0.5, n_points)
-        signal += noise
-
-        # Add anomalies
-        n_anomalies = 50
-        anomaly_indices = np.random.choice(n_points, n_anomalies, replace=False)
-        signal[anomaly_indices] += np.random.normal(0, 5, n_anomalies)
-
-        # Create multivariate series
-        df = pd.DataFrame({
-            'pattern1': signal,
-            'pattern2': np.roll(signal, 24) + np.random.normal(0, 1, n_points),
-        }, index=dates)
-
-        # Add some missing values
-        missing_mask = np.random.random(n_points) < 0.05
-        df.loc[missing_mask, 'pattern2'] = np.nan
-
-        return df, anomaly_indices
-
-
-    # Generate data
-    print("Generating synthetic data...")
-    data, true_anomalies = generate_synthetic_data()
-
-    # Initialize detector with different configurations
-    configs = [
-        {
-            'window_size': 24,
-            'n_clusters': 3,
-            'anomaly_threshold': 2.0,
-            'seasonal_period': 24,
-        },
-        {
-            'window_size': 12,
-            'n_clusters': 5,
-            'anomaly_threshold': 2.5,
-            'seasonal_period': None,
-        },
-        {
-            'window_size': 48,
-            'n_clusters': 4,
-            'anomaly_threshold': 1.5,
-            'seasonal_period': 24,
+    @property
+    def metadata(self) -> Dict[str, Any]:
+        """Get detector metadata."""
+        return {
+            **self.base_detector.metadata,
+            "type": "streaming",
+            "update_interval": self.update_interval,
+            "buffer_size": len(self._buffer),
+            "n_processed": self._n_processed
         }
-    ]
-
-    for i, config in enumerate(configs, 1):
-        print(f"\nTesting Configuration {i}:")
-        print(f"Parameters: {config}")
-
-        # Initialize detector
-        detector = TimeSeriesKMeansDetector(**config)
-
-        # Detect anomalies
-        print("\nDetecting anomalies...")
-        anomalies, scores = detector.detect_and_visualize(
-            data,
-            title=f"K-means Clustering Results - Configuration {i}"
-        )
-
-        # Print statistics
-        print("\nDetection Statistics:")
-        for column in data.columns:
-            n_anomalies = anomalies[column].sum()
-            avg_score = scores[column][anomalies[column]].mean()
-            print(f"\n{column}:")
-            print(f"Number of anomalies detected: {n_anomalies}")
-            print(f"Average anomaly score: {avg_score:.3f}")
-
-        # Get cluster profiles
-        print("\nCluster Profiles:")
-        profiles = detector.get_cluster_profiles()
-        for cluster, profile in profiles.items():
-            print(f"\n{cluster}:")
-            print(f"Size: {profile['size']}")
-            print(f"Mean distance: {profile['mean_distance']:.3f}")
-            print(f"Std distance: {profile['std_distance']:.3f}")
-
-    # Demonstrate streaming detection
-    print("\nDemonstrating streaming detection...")
 
 
-    def simulate_stream(data, chunk_size=100):
-        """Simulate streaming data from DataFrame."""
-        for i in range(0, len(data), chunk_size):
-            yield data.iloc[i:i + chunk_size]
+class DetectionResultEnhanced(DetectionResult):
+    """Enhanced DetectionResult with additional methods."""
 
-
-    # Initialize detector for streaming
-    streaming_detector = TimeSeriesKMeansDetector(
-        window_size=24,
-        n_clusters=3,
-        anomaly_threshold=2.0,
-        seasonal_period=24
-    )
-
-    # Process streaming data
-    stream = simulate_stream(data, chunk_size=100)
-    for i, (chunk_data, chunk_anomalies, chunk_scores) in enumerate(
-            streaming_detector.process_stream(stream), 1
-    ):
-        print(f"\nProcessed chunk {i}:")
-        print(f"Chunk size: {len(chunk_data)}")
-        print(f"Anomalies detected: {chunk_anomalies.sum().sum()}")
-        print(f"Average anomaly score: {chunk_scores.mean().mean():.3f}")
-
-        # Break after a few chunks for demonstration
-        if i >= 5:
-            break
-
-    # Compare with different preprocessing configurations
-    print("\nTesting different preprocessing configurations...")
-
-    preprocessor_configs = [
-        {
-            'imputation_method': 'linear',
-            'scaling_method': 'standard'
-        },
-        {
-            'imputation_method': 'knn',
-            'scaling_method': 'robust'
-        },
-        {
-            'imputation_method': 'hybrid',
-            'scaling_method': 'minmax'
-        }
-    ]
-
-    for i, prep_config in enumerate(preprocessor_configs, 1):
-        print(f"\nPreprocessing Configuration {i}:")
-        print(f"Parameters: {prep_config}")
-
-        # Initialize preprocessor and detector
-        preprocessor = TimeSeriesPreprocessor(**prep_config)
-        detector = TimeSeriesKMeansDetector(
-            window_size=24,
-            n_clusters=3,
-            preprocessor=preprocessor
-        )
-
-        # Detect anomalies
-        anomalies, scores = detector.detect_and_visualize(
-            data,
-            title=f"Results with Preprocessing Configuration {i}"
-        )
-
-        # Print summary
-        print("\nResults Summary:")
-        print(f"Total anomalies detected: {anomalies.sum().sum()}")
-        print(f"Average anomaly score: {scores.mean().mean():.3f}")
-
-    print("\nProcessing complete!")
+    def get_anomalies(self) -> List[AnomalyScore]:
+        """Get only the anomalous scores."""
+        return [score for score in self.scores if score.is_anomaly]
