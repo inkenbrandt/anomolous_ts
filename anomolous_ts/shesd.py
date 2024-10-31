@@ -1,338 +1,279 @@
-# This is a sample Python script.
-
-# Press Shift+F10 to execute it or replace it with your code.
-# Press Double Shift to search everywhere for classes, files, tool windows, actions, and settings.
-
-import pandas as pd
+from typing import Dict, List, Optional, Any, Union
 import numpy as np
+import pandas as pd
+from datetime import datetime
+from dataclasses import dataclass
 from statsmodels.tsa.seasonal import seasonal_decompose
 from statsmodels.tsa.stattools import acf
 from scipy import stats
 
+from .feature_extractors import PreprocessorProtocol
+from .base import BaseDetector, DetectionResult, AnomalyScore, TimeSeriesData
 
-class TwitterSHESD:
-    """
-    Implementation of Twitter's Seasonal Hybrid ESD (S-H-ESD) algorithm for anomaly detection.
-    This algorithm combines seasonal decomposition with the Generalized ESD test to detect
-    both global and local anomalies in time series data.
-
-    The algorithm works in the following steps:
-    1. Performs seasonal decomposition to remove seasonal patterns (optional)
-    2. Uses either hybrid (median/MAD) or standard (mean/std) statistics
-    3. Applies the Generalized ESD test to identify anomalies
-
-    Key Features:
-    - Support for multiple seasonal decomposition methods
-    - Robust statistics option using median and MAD
-    - Configurable maximum anomalies and significance level
-    - Automatic seasonal period detection
-
-    Example:
-    ```python
-    # Create detector
-    detector = TwitterSHESD(max_anomalies=0.1, alpha=0.05, hybrid=True)
-
-    # Detect anomalies with automatic period detection
-    anomalies = detector.detect(time_series)
-
-    # Or specify period and decomposition method
-    anomalies = detector.detect(time_series, period=24, decomposition_method='multiplicative')
-    ```
-    """
-
-    def __init__(self, max_anomalies=0.1, alpha=0.05, hybrid=True):
-        """
-        Initialize the Twitter S-H-ESD detector.
-
-        Parameters
-        ----------
-        max_anomalies : float, default=0.1
-            Maximum fraction of data points that can be labeled as anomalies.
-            Should be between 0 and 1.
-
-        alpha : float, default=0.05
-            Level of statistical significance for the ESD test.
-            Lower values make the test more conservative.
-
-        hybrid : bool, default=True
-            If True, use robust statistics (median and MAD) instead of
-            mean and standard deviation. Recommended for data with
-            potential extreme values.
-
-        Raises
-        ------
-        ValueError
-            If max_anomalies is not between 0 and 1
-            If alpha is not between 0 and 1
-        """
-        if not 0 < max_anomalies < 1:
+@dataclass
+class SHESDConfig:
+    """Configuration for Twitter's S-H-ESD detector."""
+    max_anomalies: float = 0.1
+    alpha: float = 0.05
+    hybrid: bool = True
+    seasonal_period: Optional[int] = None
+    decomposition_method: str = 'additive'
+    auto_detect_period: bool = True
+    max_lag: int = 366
+    
+    def __post_init__(self):
+        if not 0 < self.max_anomalies < 1:
             raise ValueError("max_anomalies must be between 0 and 1")
-        if not 0 < alpha < 1:
+        if not 0 < self.alpha < 1:
             raise ValueError("alpha must be between 0 and 1")
+        if self.decomposition_method not in ['additive', 'multiplicative', 'robust']:
+            raise ValueError("decomposition_method must be one of: additive, multiplicative, robust")
 
-        self.max_anomalies = max_anomalies
-        self.alpha = alpha
-        self.hybrid = hybrid
-
-    def _detect_period(self, data, max_lag=366):
-        """
-        Automatically detect the seasonal period using autocorrelation.
-
-        Parameters
-        ----------
-        data : pd.Series
-            Input time series
-        max_lag : int, default=366
-            Maximum lag to consider for autocorrelation
-
-        Returns
-        -------
-        int
-            Detected seasonal period
-        """
+class TwitterSHESD(BaseDetector['TwitterSHESD']):
+    """
+    Enhanced implementation of Twitter's Seasonal Hybrid ESD algorithm.
+    Adapted to conform to the common anomaly detection interface.
+    """
+    
+    def __init__(
+        self,
+        config: Optional[SHESDConfig] = None,
+        preprocessor: Optional[PreprocessorProtocol] = None
+    ):
+        self.config = config or SHESDConfig()
+        self.preprocessor = preprocessor
+        
+        # Internal state
+        self._seasonal_period: Optional[int] = self.config.seasonal_period
+        self._location_stats: Optional[np.ndarray] = None
+        self._scale_stats: Optional[np.ndarray] = None
+        
+    def _detect_period(self, data: np.ndarray) -> int:
+        """Automatically detect the seasonal period using autocorrelation."""
         n = len(data)
-        max_lag = min(max_lag, n // 2)
-
+        max_lag = min(self.config.max_lag, n // 2)
+        
         # Calculate autocorrelation
         acf_values = acf(data, nlags=max_lag, fft=True)
-
+        
         # Find peaks in autocorrelation
         peaks = []
         for i in range(1, len(acf_values) - 1):
             if acf_values[i] > acf_values[i - 1] and acf_values[i] > acf_values[i + 1]:
                 peaks.append((i, acf_values[i]))
-
+        
         # Sort peaks by correlation value
         peaks.sort(key=lambda x: x[1], reverse=True)
-
+        
         # Return the lag of the highest peak after lag 1
         for lag, corr in peaks:
             if lag > 1:
                 return lag
-
+                
         return 1  # Default if no clear seasonality is found
-
-    def _remove_seasonal_component(self, data, period, method='additive'):
-        """
-        Remove seasonal component from time series using decomposition.
-
-        Parameters
-        ----------
-        data : pd.Series
-            Input time series
-        period : int
-            Seasonal period
-        method : str, default='additive'
-            Decomposition method: 'additive', 'multiplicative', or 'robust'
-            - 'additive': Traditional additive decomposition
-            - 'multiplicative': Traditional multiplicative decomposition
-            - 'robust': Robust decomposition less sensitive to outliers
-
-        Returns
-        -------
-        pd.Series
-            Deseasonalized time series
-
-        Notes
-        -----
-        For multiplicative decomposition, all values must be positive.
-        Robust decomposition is experimental and may be slower.
-        """
-        if method == 'multiplicative' and (data <= 0).any():
+    
+    def _remove_seasonal_component(
+        self,
+        data: pd.Series,
+        period: int
+    ) -> pd.Series:
+        """Remove seasonal component from time series."""
+        if (
+            self.config.decomposition_method == 'multiplicative'
+            and (data <= 0).any()
+        ):
             raise ValueError("Multiplicative decomposition requires positive values")
-
+            
         decomposition = seasonal_decompose(
             data,
             period=period,
-            model=method,
+            model=self.config.decomposition_method,
             extrapolate_trend='freq'
         )
-
-        if method == 'multiplicative':
+        
+        if self.config.decomposition_method == 'multiplicative':
             residual = data / decomposition.seasonal
         else:
             residual = data - decomposition.seasonal
-
+            
         return residual
-
-    def _compute_statistics(self, data):
-        """
-        Compute location and scale statistics based on hybrid parameter.
-
-        Parameters
-        ----------
-        data : np.array
-            Input data
-
-        Returns
-        -------
-        tuple
-            (location, scale) statistics
-
-        Notes
-        -----
-        If hybrid=True, uses median and MAD (Median Absolute Deviation)
-        If hybrid=False, uses mean and standard deviation
-        """
-        if self.hybrid:
+    
+    def _compute_statistics(self, data: np.ndarray) -> tuple:
+        """Compute location and scale statistics."""
+        if self.config.hybrid:
             location = np.median(data)
-            # MAD scaled by 1.4826 to be consistent with standard deviation
             scale = np.median(np.abs(data - location)) * 1.4826
         else:
             location = np.mean(data)
             scale = np.std(data, ddof=1)
         return location, scale
-
-    def _generalized_esd_test(self, data, max_outliers):
-        """
-        Perform the Generalized ESD test to detect outliers.
-
-        Parameters
-        ----------
-        data : np.array
-            Input data
-        max_outliers : int
-            Maximum number of outliers to detect
-
-        Returns
-        -------
-        list
-            Indices of detected anomalies
-
-        Notes
-        -----
-        The Generalized ESD (Extreme Studentized Deviate) test is an extension
-        of Grubbs' test for multiple outliers. It progressively tests for
-        k outliers, where k goes from 1 to max_outliers.
-        """
+    
+    def _generalized_esd_test(
+        self,
+        data: np.ndarray,
+        max_outliers: int
+    ) -> List[int]:
+        """Perform the Generalized ESD test."""
         n = len(data)
         outlier_indices = []
-
+        working_data = data.copy()
+        
         for i in range(max_outliers):
-            location, scale = self._compute_statistics(data)
+            location, scale = self._compute_statistics(working_data)
             if scale == 0:
                 break
-
+                
+            # Store statistics
+            self._location_stats = location
+            self._scale_stats = scale
+            
             # Compute test statistics
-            test_statistics = np.abs(data - location) / scale
+            test_statistics = np.abs(working_data - location) / scale
             max_idx = np.argmax(test_statistics)
             max_stat = test_statistics[max_idx]
-
+            
             # Compute critical value
-            t_stat = stats.t.ppf(1 - self.alpha / (2 * (n - i)), n - i - 2)
+            t_stat = stats.t.ppf(1 - self.config.alpha / (2 * (n - i)), n - i - 2)
             lambda_i = ((n - i - 1) * t_stat) / np.sqrt((n - i - 2 + t_stat ** 2) * (n - i))
-
+            
             if max_stat > lambda_i:
-                outlier_indices.append(max_idx)
-                data = np.delete(data, max_idx)
+                # Map back to original index
+                original_idx = np.where(data == working_data[max_idx])[0][0]
+                outlier_indices.append(original_idx)
+                working_data = np.delete(working_data, max_idx)
             else:
                 break
-
+                
         return outlier_indices
-
-    def detect(self, time_series, period=None, decomposition_method='additive'):
-        """
-        Detect anomalies in the time series.
-
-        Parameters
-        ----------
-        time_series : pd.Series
-            Input time series with datetime index
-        period : int, optional
-            Seasonal period. If None, will attempt to detect automatically
-        decomposition_method : str, default='additive'
-            Method for seasonal decomposition:
-            - 'additive': Suitable for constant seasonal variations
-            - 'multiplicative': Suitable when seasonal variations change with level
-            - 'robust': Less sensitive to outliers but slower
-
-        Returns
-        -------
-        pd.Series
-            Boolean series indicating anomalies (True for anomalies)
-
-        Examples
-        --------
-        >>> # Generate sample data
-        >>> dates = pd.date_range('2024-01-01', periods=100, freq='h')
-        >>> values = np.sin(np.linspace(0, 8*np.pi, 100)) * 10 + np.random.normal(0, 1, 100)
-        >>> values[25] = 30  # Add an anomaly
-        >>> ts = pd.Series(values, index=dates)
-        >>>
-        >>> # Create detector and detect anomalies
-        >>> detector = TwitterSHESD(max_anomalies=0.1)
-        >>> anomalies = detector.detect(ts, period=24)
-        >>>
-        >>> # Print anomalous points
-        >>> print(ts[anomalies])
-        """
-        data = time_series.copy()
-
-        # Automatically detect period if not provided
-        if period is None:
-            period = self._detect_period(data)
-
-        # Remove seasonal component if period > 1
-        if period > 1:
-            data = self._remove_seasonal_component(data, period, decomposition_method)
-
-        # Convert to numpy array for processing
-        values = data.values
-        max_outliers = int(np.ceil(len(values) * self.max_anomalies))
-
+    
+    def _calculate_anomaly_scores(
+        self,
+        data: np.ndarray,
+        anomaly_indices: List[int]
+    ) -> List[AnomalyScore]:
+        """Calculate anomaly scores for all points."""
+        scores = []
+        normalized_deviations = np.abs(data - self._location_stats) / self._scale_stats
+        
+        # Convert to probability scores using sigmoid
+        probability_scores = 1 / (1 + np.exp(-normalized_deviations))
+        
+        for i in range(len(data)):
+            is_anomaly = i in anomaly_indices
+            score = float(probability_scores[i])
+            
+            scores.append(AnomalyScore(
+                score=score,
+                is_anomaly=is_anomaly,
+                confidence=float(abs(score - 0.5) * 2),
+                timestamp=datetime.now(),
+                contributing_features={
+                    "deviation": float(normalized_deviations[i]),
+                    "relative_score": float(score / max(probability_scores))
+                }
+            ))
+            
+        return scores
+    
+    def fit(self, data: TimeSeriesData) -> 'TwitterSHESD':
+        """Fit the detector to the data."""
+        if self.preprocessor is not None:
+            data = self.preprocessor.transform(data)
+            
+        # Convert to Series if DataFrame
+        if isinstance(data, pd.DataFrame):
+            if data.shape[1] > 1:
+                raise ValueError("TwitterSHESD only supports univariate time series")
+            data = data.iloc[:, 0]
+            
+        # Detect period if needed
+        if self.config.auto_detect_period and self._seasonal_period is None:
+            self._seasonal_period = self._detect_period(data.values)
+            
+        return self
+    
+    def predict(self, data: TimeSeriesData) -> DetectionResult:
+        """Predict anomalies in the data."""
+        if self.preprocessor is not None:
+            data = self.preprocessor.transform(data)
+            
+        # Convert to Series if DataFrame
+        if isinstance(data, pd.DataFrame):
+            data = data.iloc[:, 0]
+            
+        # Remove seasonality if period is set
+        if self._seasonal_period and self._seasonal_period > 1:
+            adjusted_data = self._remove_seasonal_component(
+                data,
+                self._seasonal_period
+            )
+        else:
+            adjusted_data = data.copy()
+            
+        # Calculate maximum number of outliers
+        max_outliers = int(np.ceil(len(data) * self.config.max_anomalies))
+        
         # Detect anomalies
-        anomaly_indices = self._generalized_esd_test(values, max_outliers)
-
-        # Create boolean mask for anomalies
-        is_anomaly = pd.Series(False, index=time_series.index)
-        is_anomaly.iloc[anomaly_indices] = True
-
-        return is_anomaly
-
-
-# Example usage demonstrating different features
-if __name__ == "__main__":
-    # Generate sample data with multiple patterns
-    np.random.seed(42)
-    dates = pd.date_range(start='2024-01-01', periods=500, freq='h')
-
-    # Create base signal with daily seasonality
-    t = np.linspace(0, 20 * np.pi, 500)
-    base = np.sin(t / 12) * 10  # Daily pattern (24 hours)
-    trend = np.linspace(0, 5, 500)  # Upward trend
-    noise = np.random.normal(0, 0.5, 500)
-
-    # Add some anomalies
-    anomalies = np.zeros(500)
-    anomalies[100] = 15
-    anomalies[200] = -10
-    anomalies[300] = 20
-    anomalies[400:403] = 12  # Multiple consecutive anomalies
-
-    # Combine components
-    values = base + trend + noise + anomalies
-    time_series = pd.Series(values, index=dates)
-
-    # Example 1: Basic usage with automatic period detection
-    detector1 = TwitterSHESD(max_anomalies=0.05, hybrid=True)
-    anomalies1 = detector1.detect(time_series)
-    print("\nExample 1 - Automatic period detection:")
-    print(f"Found {anomalies1.sum()} anomalies")
-    print(time_series[anomalies1])
-
-    # Example 2: Using multiplicative decomposition
-    # First make all values positive by adding a constant
-    positive_series = time_series - time_series.min() + 1
-    detector2 = TwitterSHESD(max_anomalies=0.05, hybrid=False)
-    anomalies2 = detector2.detect(positive_series, period=24, decomposition_method='multiplicative')
-    print("\nExample 2 - Multiplicative decomposition:")
-    print(f"Found {anomalies2.sum()} anomalies")
-    print(positive_series[anomalies2])
-
-    # Example 3: Using robust decomposition
-    detector3 = TwitterSHESD(max_anomalies=0.03, alpha=0.01)
-    anomalies3 = detector3.detect(time_series, period=24, decomposition_method='robust')
-    print("\nExample 3 - Robust decomposition:")
-    print(f"Found {anomalies3.sum()} anomalies")
-    print(time_series[anomalies3])
-
+        anomaly_indices = self._generalized_esd_test(
+            adjusted_data.values,
+            max_outliers
+        )
+        
+        # Calculate scores
+        scores = self._calculate_anomaly_scores(
+            adjusted_data.values,
+            anomaly_indices
+        )
+        
+        return DetectionResult(
+            scores=scores,
+            detector_name="TwitterSHESD",
+            detection_time=datetime.now(),
+            metadata={
+                "seasonal_period": self._seasonal_period,
+                "decomposition_method": self.config.decomposition_method,
+                "hybrid_statistics": self.config.hybrid,
+                "max_anomalies": self.config.max_anomalies,
+                "alpha": self.config.alpha,
+                "num_anomalies_found": len(anomaly_indices)
+            }
+        )
+    
+    def score(self, data: TimeSeriesData) -> np.ndarray:
+        """Get raw anomaly scores."""
+        if self.preprocessor is not None:
+            data = self.preprocessor.transform(data)
+            
+        if isinstance(data, pd.DataFrame):
+            data = data.iloc[:, 0]
+            
+        if self._seasonal_period and self._seasonal_period > 1:
+            adjusted_data = self._remove_seasonal_component(
+                data,
+                self._seasonal_period
+            )
+        else:
+            adjusted_data = data.copy()
+            
+        location, scale = self._compute_statistics(adjusted_data.values)
+        return np.abs(adjusted_data.values - location) / scale
+    
+    @property
+    def metadata(self) -> Dict[str, Any]:
+        """Get detector metadata."""
+        return {
+            "name": "TwitterSHESD",
+            "version": "2.0",
+            "config": {
+                "max_anomalies": self.config.max_anomalies,
+                "alpha": self.config.alpha,
+                "hybrid": self.config.hybrid,
+                "seasonal_period": self._seasonal_period,
+                "decomposition_method": self.config.decomposition_method,
+                "auto_detect_period": self.config.auto_detect_period
+            },
+            "statistics": {
+                "location": float(self._location_stats) if self._location_stats is not None else None,
+                "scale": float(self._scale_stats) if self._scale_stats is not None else None
+            }
+        }

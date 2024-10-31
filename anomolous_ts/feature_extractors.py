@@ -13,7 +13,13 @@ from dataclasses import dataclass, field
 from scipy.stats import entropy
 import warnings
 from abc import ABC, abstractmethod
-
+from abc import ABC, abstractmethod
+from typing import Dict, List, Optional, Union, Any
+import numpy as np
+import pandas as pd
+from scipy import stats, signal
+import pywt
+from dataclasses import dataclass, field
 
 class TimeSeriesPreprocessor:
     """
@@ -132,13 +138,7 @@ class PreprocessorProtocol:
     outlier_threshold: float = 3.0
 
 
-from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Union, Any
-import numpy as np
-import pandas as pd
-from scipy import stats, signal
-import pywt
-from dataclasses import dataclass, field
+
 
 
 @dataclass

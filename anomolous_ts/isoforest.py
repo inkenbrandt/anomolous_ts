@@ -4,6 +4,7 @@ import pandas as pd
 from datetime import datetime
 from scipy import stats
 from sklearn.ensemble import IsolationForest
+from pandas.errors import OutOfBoundsDatetime
 from sklearn.preprocessing import StandardScaler
 
 from .base import BaseDetector, StreamingDetector, DetectionResult, AnomalyScore, TimeSeriesData
@@ -15,7 +16,7 @@ from .feature_extractors import (
     WaveletFeatureExtractor
 )
 
-T = TypeVar('T', bound='TimeSeriesIsolationForest')
+
 
 class IsolationForestConfig:
     """Configuration for Isolation Forest detector."""
@@ -45,9 +46,48 @@ class IsolationForestConfig:
             'wavelet': False
         }
 
+T = TypeVar('T', bound='TimeSeriesIsolationForest')
 
-class TimeSeriesIsolationForest(BaseDetector[T]):
+
+class TimeSeriesIsolationForest(BaseDetector['TimeSeriesIsolationForest']):
     """Enhanced Isolation Forest for time series anomaly detection."""
+
+    def __init__(
+            self,
+            config: Optional[IsolationForestConfig] = None,
+            preprocessor: Optional[Any] = None
+    ) -> None:
+        """
+        Initialize the Isolation Forest detector.
+
+        Parameters
+        ----------
+        config : Optional[IsolationForestConfig]
+            Configuration object for the detector. If None, uses default config.
+        preprocessor : Optional[Any]
+            Optional preprocessor for the data
+        """
+        super().__init__()
+        self.config = config if config is not None else IsolationForestConfig()
+        self.preprocessor = preprocessor
+
+        # Initialize Isolation Forest model
+        self._model = IsolationForest(
+            n_estimators=self.config.n_estimators,
+            contamination=self.config.contamination,
+            max_features=self.config.max_features,
+            bootstrap=self.config.bootstrap,
+            n_jobs=self.config.n_jobs,
+            random_state=self.config.random_state
+        )
+
+        # Initialize feature extractors
+        self._feature_extractors = []
+        self._setup_feature_extractors()
+
+        # Internal state
+        self._feature_scaler: Optional[StandardScaler] = None
+        self._decision_scores: Optional[np.ndarray] = None
 
     def _setup_feature_extractors(self) -> None:
         """Initialize feature extractors based on configuration."""
@@ -104,7 +144,7 @@ class TimeSeriesIsolationForest(BaseDetector[T]):
     def fit(self, data: TimeSeriesData) -> T:
         """Fit the detector to the data."""
         if self.preprocessor is not None:
-            data = self.preprocessor.transform(data)
+            data = self.preprocessor.impute_missing_values(data)
 
         # Convert to numpy array if needed
         if isinstance(data, (pd.Series, pd.DataFrame)):
@@ -134,7 +174,7 @@ class TimeSeriesIsolationForest(BaseDetector[T]):
             raise ValueError("Detector must be fitted before prediction")
 
         if self.preprocessor is not None:
-            data = self.preprocessor.transform(data)
+            data = self.preprocessor.impute_missing_values(data)
 
         # Convert to numpy array
         if isinstance(data, (pd.Series, pd.DataFrame)):
