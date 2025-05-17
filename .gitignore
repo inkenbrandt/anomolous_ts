@@ -49,3 +49,9 @@ __pycache__
 
 docs/build
 site/
+/src/anomolous_ts/__pycache__
+/.github
+/.idea
+/.pytest_cache
+/tests/__pycache__
+/tests/.hypothesis
